@@ -46,17 +46,23 @@ export function registerOutboundRoutes(fastify) {
 
   // Route to initiate outbound calls
   fastify.post("/outbound-call", async (request, reply) => {
-    const { number, prompt } = request.body;
+    const { number, prompt, firstMessage } = request.body;
 
     if (!number) {
       return reply.code(400).send({ error: "Phone number is required" });
     }
 
     try {
+      // Cria a URL para o TwiML
+      const twimlUrl = new URL(`https://${request.headers.host}/outbound-call-twiml`);
+      twimlUrl.searchParams.append('prompt', prompt || '');
+      twimlUrl.searchParams.append('firstMessage', firstMessage || '');
+
+      // Inicia a chamada com o Twilio
       const call = await twilioClient.calls.create({
         from: TWILIO_PHONE_NUMBER,
         to: number,
-        url: `https://${request.headers.host}/outbound-call-twiml?prompt=${encodeURIComponent(prompt)}`
+        url: twimlUrl.toString()
       });
 
       reply.send({ 
@@ -76,12 +82,14 @@ export function registerOutboundRoutes(fastify) {
   // TwiML route for outbound calls
   fastify.all("/outbound-call-twiml", async (request, reply) => {
     const prompt = request.query.prompt || '';
+    const firstMessage = request.query.firstMessage || ''; 
 
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
       <Response>
         <Connect>
           <Stream url="wss://${request.headers.host}/outbound-media-stream">
             <Parameter name="prompt" value="${prompt}" />
+            <Parameter name="firstMessage" value="${firstMessage}" />
           </Stream>
         </Connect>
       </Response>`;
@@ -117,8 +125,8 @@ export function registerOutboundRoutes(fastify) {
               type: "conversation_initiation_client_data",
               conversation_config_override: {
                 agent: {
-                  prompt: { prompt: customParameters?.prompt || "you are a gary from the phone store" },
-                  first_message: "hey there! how can I help you today?",
+                  prompt: { prompt: customParameters?.prompt},
+                  first_message: customParameters?.firstMessage,
                 },
               }
             };
