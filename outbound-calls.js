@@ -1,6 +1,5 @@
 import WebSocket from "ws";
 import Twilio from "twilio";
-import crypto from 'crypto';
 
 export function registerOutboundRoutes(fastify) {
   // Check for required environment variables
@@ -47,7 +46,7 @@ export function registerOutboundRoutes(fastify) {
 
   // Route to initiate outbound calls
   fastify.post("/outbound-call", async (request, reply) => {
-    const { number, prompt, firstMessage,webhook } = request.body;
+    const { number, prompt, firstMessage,webhook, externalId } = request.body;
 
     console.log(webhook)
     if (!number) {
@@ -56,7 +55,7 @@ export function registerOutboundRoutes(fastify) {
 
     try {
       // Cria a URL para o TwiML
-      const guid = crypto.randomUUID();
+      const guid = externalId;
       const twimlUrl = new URL(`https://${request.headers.host}/outbound-call-twiml`);
       twimlUrl.searchParams.append('prompt', prompt || '');
       twimlUrl.searchParams.append('firstMessage', firstMessage || '');
@@ -74,7 +73,7 @@ export function registerOutboundRoutes(fastify) {
       reply.send({ 
         success: true, 
         message: "Call initiated",
-        id: guid, 
+        externalId: guid, 
         callSid: call.sid 
       });
     } catch (error) {
@@ -120,7 +119,7 @@ export function registerOutboundRoutes(fastify) {
       let elevenLabsWs = null;
       let customParameters = null;  // Add this to store parameters
       let webhook = null;
-      let id = null;
+      let externalId = null;
       let conversationHistory = [];
 
       // Handle WebSocket errors
@@ -251,23 +250,23 @@ export function registerOutboundRoutes(fastify) {
               }
             } catch (error) {
               console.error("[ElevenLabs] Error processing message:", error);
-              sendWebhook("error", { id, error: error.message, conversationHistory });
+              sendWebhook("error", { externalId, error: error.message, conversationHistory });
             }
           });
   
           elevenLabsWs.on("error", (error) => {
             console.error("[ElevenLabs] WebSocket error:", error);
-            sendWebhook("error", { id, error: error.message, conversationHistory });
+            sendWebhook("error", { externalId, error: error.message, conversationHistory });
           });
   
           elevenLabsWs.on("close", () => {
             console.log("[ElevenLabs] Disconnected");
-            sendWebhook("call_ended", { id, callSid, conversationId, conversationHistory });
+            sendWebhook("call_ended", { externalId, callSid, conversationId, conversationHistory });
             
           });
         } catch (error) {
           console.error("[ElevenLabs] Setup error:", error);
-          sendWebhook("error", { id, error: error.message, conversationHistory });
+          sendWebhook("error", { externalId, error: error.message, conversationHistory });
         }
       };
 
@@ -287,7 +286,7 @@ export function registerOutboundRoutes(fastify) {
               console.log(`[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`);
               console.log('[Twilio] Start parameters:', customParameters);
               webhook = customParameters?.webhook;
-              id = customParameters?.id;
+              externalId = customParameters?.id;
               break;
 
             case "media":
