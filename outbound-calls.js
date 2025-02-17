@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import Twilio from "twilio";
+import crypto from 'crypto';
 
 export function registerOutboundRoutes(fastify) {
   // Check for required environment variables
@@ -46,17 +47,22 @@ export function registerOutboundRoutes(fastify) {
 
   // Route to initiate outbound calls
   fastify.post("/outbound-call", async (request, reply) => {
-    const { number, prompt, firstMessage } = request.body;
+    const { number, prompt, firstMessage,webhook } = request.body;
 
+    console.log(webhook)
     if (!number) {
       return reply.code(400).send({ error: "Phone number is required" });
     }
 
     try {
       // Cria a URL para o TwiML
+      const guid = crypto.randomUUID();
       const twimlUrl = new URL(`https://${request.headers.host}/outbound-call-twiml`);
       twimlUrl.searchParams.append('prompt', prompt || '');
       twimlUrl.searchParams.append('firstMessage', firstMessage || '');
+      twimlUrl.searchParams.append('webhook', webhook || '');
+      twimlUrl.searchParams.append('id', guid || '');
+
 
       // Inicia a chamada com o Twilio
       const call = await twilioClient.calls.create({
@@ -67,7 +73,8 @@ export function registerOutboundRoutes(fastify) {
 
       reply.send({ 
         success: true, 
-        message: "Call initiated", 
+        message: "Call initiated",
+        id: guid, 
         callSid: call.sid 
       });
     } catch (error) {
@@ -83,6 +90,8 @@ export function registerOutboundRoutes(fastify) {
   fastify.all("/outbound-call-twiml", async (request, reply) => {
     const prompt = request.query.prompt || '';
     const firstMessage = request.query.firstMessage || ''; 
+    const webhook = request.query.webhook || '';
+    const id = request.query.id || ''; 
 
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
       <Response>
@@ -90,6 +99,8 @@ export function registerOutboundRoutes(fastify) {
           <Stream url="wss://${request.headers.host}/outbound-media-stream">
             <Parameter name="prompt" value="${prompt}" />
             <Parameter name="firstMessage" value="${firstMessage}" />
+            <Parameter name="webhook" value="${webhook}" />
+            <Parameter name="id" value="${id}" />
           </Stream>
         </Connect>
       </Response>`;
@@ -105,11 +116,37 @@ export function registerOutboundRoutes(fastify) {
       // Variables to track the call
       let streamSid = null;
       let callSid = null;
+      let conversationId = null;
       let elevenLabsWs = null;
       let customParameters = null;  // Add this to store parameters
+      let webhook = null;
+      let id = null;
+      let conversationHistory = [];
 
       // Handle WebSocket errors
       ws.on('error', console.error);
+ 
+    // Function to send webhook without axios
+    const sendWebhook = async (event, data) => {
+      console.log('URL WEBHOOK');
+      console.log(webhook);
+      if (customParameters?.webhook) {
+        try {
+          const response = await fetch(customParameters.webhook, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event, ...data })
+          });
+          if (response.ok) {
+            console.log(`[Webhook] Sent event: ${event}`);
+          } else {
+            console.error("[Webhook] Failed to send webhook:", response.statusText);
+          }
+        } catch (error) {
+          console.error("[Webhook] Error sending webhook:", error);
+        }
+      }
+    };
 
       // Set up ElevenLabs connection
       const setupElevenLabs = async () => {
@@ -144,6 +181,9 @@ export function registerOutboundRoutes(fastify) {
               switch (message.type) {
                 case "conversation_initiation_metadata":
                   console.log("[ElevenLabs] Received initiation metadata");
+                  if (message.conversation_initiation_metadata_event?.conversation_id) {
+                    conversationId = message.conversation_initiation_metadata_event.conversation_id;
+                  }
                   break;
 
                 case "audio":
@@ -189,25 +229,45 @@ export function registerOutboundRoutes(fastify) {
                     }));
                   }
                   break;
+                case 'user_transcript':
+                  const userText = {
+                    role: "Cliente",
+                    text: message.user_transcription_event?.user_transcript || "Sem texto"
+                  };
+                  conversationHistory.push(userText);
+                  console.log(`[User] ${message.user_transcription_event.user_transcript}`);
+                  break;
+                case 'agent_response':
+                  const agentText = {
+                    role: "Atendente",
+                    text: message.agent_response_event?.agent_response || "Sem texto"
+                  };
+                  conversationHistory.push(agentText);
+                  console.log(`[Agent] ${message.agent_response_event.agent_response}`);
+                  break;
 
                 default:
                   console.log(`[ElevenLabs] Unhandled message type: ${message.type}`);
               }
             } catch (error) {
               console.error("[ElevenLabs] Error processing message:", error);
+              sendWebhook("error", { id, error: error.message, conversationHistory });
             }
           });
-
+  
           elevenLabsWs.on("error", (error) => {
             console.error("[ElevenLabs] WebSocket error:", error);
+            sendWebhook("error", { id, error: error.message, conversationHistory });
           });
-
+  
           elevenLabsWs.on("close", () => {
             console.log("[ElevenLabs] Disconnected");
+            sendWebhook("call_ended", { id, callSid, conversationId, conversationHistory });
+            
           });
-
         } catch (error) {
           console.error("[ElevenLabs] Setup error:", error);
+          sendWebhook("error", { id, error: error.message, conversationHistory });
         }
       };
 
@@ -218,7 +278,6 @@ export function registerOutboundRoutes(fastify) {
       ws.on("message", (message) => {
         try {
           const msg = JSON.parse(message);
-          console.log(`[Twilio] Received event: ${msg.event}`);
 
           switch (msg.event) {
             case "start":
@@ -227,6 +286,8 @@ export function registerOutboundRoutes(fastify) {
               customParameters = msg.start.customParameters;  // Store parameters
               console.log(`[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`);
               console.log('[Twilio] Start parameters:', customParameters);
+              webhook = customParameters?.webhook;
+              id = customParameters?.id;
               break;
 
             case "media":
@@ -261,5 +322,16 @@ export function registerOutboundRoutes(fastify) {
         }
       });
     });
+  });
+
+  fastify.post("/webhook", async (request, reply) => {
+    try {
+      const eventData = request.body;
+      console.log("[Webhook] Received event:", eventData);
+      reply.send({ success: true });
+    } catch (error) {
+      console.error("[Webhook] Error processing event:", error);
+      reply.status(500).send({ success: false, error: error.message });
+    }
   });
 }
