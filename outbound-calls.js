@@ -261,7 +261,15 @@ export function registerOutboundRoutes(fastify) {
           elevenLabsWs.on("close", () => {
             console.log("[ElevenLabs] Disconnected");
             sendWebhook("call_ended", { externalId, callSid, conversationId, conversationHistory });
-            
+            if (ws?.readyState === WebSocket.OPEN) {
+              console.log("[Twilio] Aguardando 2 segundos antes de encerrar a chamada...");
+          
+              setTimeout(() => {
+                console.log("[Twilio] Encerrando a chamada devido ao fechamento do ElevenLabs");
+                ws.send(JSON.stringify({ event: "stop" }));
+                ws.close();
+              }, 2000);
+            }     
           });
         } catch (error) {
           console.error("[ElevenLabs] Setup error:", error);
